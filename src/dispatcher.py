@@ -21,9 +21,16 @@ class DispatchEngine:
         # 储氢参数
         self.h2_storage_capacity = config.get('h2_storage_capacity', 1000)  # kg
         self.h2_storage_level = config.get('h2_storage_level', 500)  # 当前储量
-        # 电价参数
-        self.electricity_price_low = config.get('electricity_price_low', 0.3)
-        self.electricity_price_high = config.get('electricity_price_high', 0.8)
+        # 电价参数（区分购电和售电）
+        # 购电电价：工商业峰谷电价
+        self.grid_buy_price_low = config.get('grid_buy_price_low', 0.3)  # 元/kWh，谷时购电价
+        self.grid_buy_price_high = config.get('grid_buy_price_high', 0.8)  # 元/kWh，峰时购电价
+        # 售电电价：新能源并网标杆电价（固定，不随峰谷变化）
+        self.grid_sell_price = config.get('grid_sell_price', 0.35)  # 元/kWh，上网电价
+        # 绿氢售价
+        self.h2_sell_price = config.get('h2_sell_price', 30)  # 元/kg
+        # 供热价格
+        self.heat_sell_price = config.get('heat_sell_price', 0.3)  # 元/kWh
     def dispatch(self, wind_power, solar_power, timestamp=None):
         """
         核心调度逻辑（并网场景：电网作为备用电源，保证电解槽满负荷运行）
@@ -66,17 +73,25 @@ class DispatchEngine:
         # ========== 步骤4: 经济计算 ==========
         hour = timestamp.hour if timestamp else 12
         is_peak = 8 <= hour <= 20
-        electricity_price = self.electricity_price_high if is_peak else self.electricity_price_low
-        h2_revenue = h2_produced * 30  # 绿氢售价约 30 元/kg
-        grid_export_revenue = grid_export * electricity_price  # 上网售电收益
-        grid_import_cost = grid_import * electricity_price  # 购电成本
-        net_economic_benefit = h2_revenue + grid_export_revenue - grid_import_cost
+        # 购电电价：峰谷电价（工商业用电）
+        grid_buy_price = self.grid_buy_price_high if is_peak else self.grid_buy_price_low
+        # 售电电价：固定标杆电价（新能源并网电价，不随峰谷变化）
+        grid_sell_price = self.grid_sell_price
+        # 收益计算
+        h2_revenue = h2_produced * self.h2_sell_price  # 绿氢销售收益
+        heat_revenue = chp_heat * self.heat_sell_price  # 余热供热收益
+        grid_export_revenue = grid_export * grid_sell_price  # 上网售电收益
+        grid_import_cost = grid_import * grid_buy_price  # 购电成本
+        # 毛经济效益（不含运维、折旧等成本，由evaluator统一核算全成本）
+        gross_economic_benefit = h2_revenue + heat_revenue + grid_export_revenue - grid_import_cost
         # ========== 步骤5: 碳减排计算 ==========
         # 仅绿电制氢和绿电对应的余热产生减排，网电部分不计入
         green_h2 = green_for_h2 / self.electrolyzer_efficiency  # 绿电生产的氢气
         green_heat = green_for_h2 * self.waste_heat_ratio * self.recovery_efficiency  # 绿电对应的余热
         # 碳减排因子：氢 10 kgCO2/kg（替代灰氢），热 0.11 kgCO2/kWh（替代燃煤供热）
         carbon_savings = green_h2 * 10 + green_heat * 0.11
+        # 绿电占比（用于绿氢认证）
+        green_power_ratio = green_for_h2 / electrolyzer_power if electrolyzer_power > 0 else 0
         # 记录结果
         result = {
             'timestamp': timestamp or datetime.now(),
@@ -85,6 +100,7 @@ class DispatchEngine:
             'total_green_power': total_green_power,
             'electrolyzer_power': electrolyzer_power,
             'green_for_h2': green_for_h2,
+            'green_power_ratio': green_power_ratio,  # 电解槽用电中绿电占比
             'h2_produced': h2_produced,
             'h2_storage_level': self.h2_storage_level,
             'chp_power': chp_power,
@@ -92,12 +108,14 @@ class DispatchEngine:
             'grid_import': grid_import,
             'grid_export': grid_export,
             'curtailment': curtailment,
-            'electricity_price': electricity_price,
+            'grid_buy_price': grid_buy_price,
+            'grid_sell_price': grid_sell_price,
             'is_peak': is_peak,
             'h2_revenue': h2_revenue,
+            'heat_revenue': heat_revenue,
             'grid_export_revenue': grid_export_revenue,
             'grid_import_cost': grid_import_cost,
-            'net_economic_benefit': net_economic_benefit,
+            'gross_economic_benefit': gross_economic_benefit,
             'carbon_savings': carbon_savings
         }
         self.history.append(result)
@@ -160,11 +178,17 @@ class DispatchEngine:
 | 指标 | 值 |
 |------|-----|
 | 绿氢收益 | {df['h2_revenue'].sum():.2f} 元 |
+| 供热收益 | {df['heat_revenue'].sum():.2f} 元 |
 | 上网售电收益 | {df['grid_export_revenue'].sum():.2f} 元 |
 | 购电成本 | {df['grid_import_cost'].sum():.2f} 元 |
-| 毛经济效益 | {df['net_economic_benefit'].sum():.2f} 元 |
+| 毛经济效益 | {df['gross_economic_benefit'].sum():.2f} 元 |
 | 峰时调度次数 | {df['is_peak'].sum()} 次 |
 | 谷时调度次数 | {len(results) - df['is_peak'].sum()} 次 |
+### 绿氢属性
+| 指标 | 值 |
+|------|-----|
+| 平均绿电占比 | {df['green_power_ratio'].mean() * 100:.2f}% |
+| 绿氢产量 | {df['green_for_h2'].sum() / self.electrolyzer_efficiency:.2f} kg |
 ### 环保性分析
 | 指标 | 值 |
 |------|-----|
@@ -190,8 +214,9 @@ class DispatchEngine:
             'chp_heat_total': df['chp_heat'].sum(),
             'grid_import_total': df['grid_import'].sum(),
             'grid_export_total': df['grid_export'].sum(),
-            'economic_benefit': df['net_economic_benefit'].sum(),
+            'gross_economic_benefit': df['gross_economic_benefit'].sum(),
             'carbon_savings': df['carbon_savings'].sum(),
+            'green_power_ratio': df['green_power_ratio'].mean() * 100,  # 平均绿电占比
             'self_use_rate': df['green_for_h2'].sum() / df['total_green_power'].sum() * 100 if df['total_green_power'].sum() > 0 else 0,
             'export_rate': df['grid_export'].sum() / df['total_green_power'].sum() * 100 if df['total_green_power'].sum() > 0 else 0,
             'curtailment_rate': df['curtailment'].sum() / df['total_green_power'].sum() * 100 if df['total_green_power'].sum() > 0 else 0

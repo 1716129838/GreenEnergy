@@ -44,8 +44,14 @@ class GreenEnergySystem:
             'h2_storage_capacity': 3000,  # kg，储氢罐容量
             'h2_storage_level': 1500,  # 当前储氢量
             # 经济参数
-            'electricity_price_low': 0.3,  # 元/kWh，谷时电价
-            'electricity_price_high': 0.8,  # 元/kWh，峰时电价
+            # 购电电价（工商业峰谷电价）
+            'grid_buy_price_low': 0.3,  # 元/kWh，谷时购电价
+            'grid_buy_price_high': 0.8,  # 元/kWh，峰时购电价
+            # 售电电价（新能源并网标杆电价）
+            'grid_sell_price': 0.35,  # 元/kWh，上网电价
+            # 产品售价
+            'h2_sell_price': 30,  # 元/kg，绿氢售价
+            'heat_sell_price': 0.3,  # 元/kWh，供热价格
             # 预测参数
             'lookback_window': 24,  # 历史窗口（小时）
             'forecast_horizon': 24,  # 预测 horizon（小时）
@@ -89,7 +95,22 @@ class GreenEnergySystem:
             output_dir=self.output_dir,
             electrolyzer_rated=self.config['electrolyzer_capacity'],
             chp_rated=self.config['chp_capacity'],
-            h2_storage_rated=self.config['h2_storage_capacity']
+            h2_storage_rated=self.config['h2_storage_capacity'],
+            # 设备投资参数（参考行业平均水平）
+            electrolyzer_investment=1000,  # 电解槽单位投资 元/kW
+            wind_investment=7000,  # 风电单位投资 元/kW
+            solar_investment=4500,  # 光伏单位投资 元/kW
+            # 折旧年限
+            electrolyzer_lifetime=10,  # 电解槽折旧年限
+            wind_lifetime=20,  # 风电折旧年限
+            solar_lifetime=25,  # 光伏折旧年限
+            # 运维成本参数
+            wind_om_cost=0.05,  # 风电运维成本 元/kWh
+            solar_om_cost=0.03,  # 光伏运维成本 元/kWh
+            h2_om_ratio=0.10,  # 制氢运维成本占氢收益比例
+            # 其他成本
+            land_cost_ratio=0.02,  # 土地成本占总投资比例（年化）
+            financial_cost_ratio=0.04  # 财务成本占总投资比例（年化）
         )
         print("✓ 系统初始化完成\n")
     def run(self):
@@ -169,9 +190,11 @@ class GreenEnergySystem:
         print("\n[阶段5] 系统能效评估...")
         metrics = self.evaluator.evaluate(dispatch_results, wind_forecast, solar_forecast)
         print(f"  系统综合能效: {metrics['overall_efficiency']:.2f}%")
+        print(f"  绿电占比: {metrics['green_power_ratio']:.2f}%")
         print(f"  绿氢产量: {metrics['h2_production']:.2f} kg")
         print(f"  碳减排量: {metrics['carbon_savings']:.2f} kg CO2")
         print(f"  净经济效益: {metrics['net_economic_benefit']:.2f} 元")
+        print(f"  系统总投资估算: {metrics['total_investment_est'] / 10000:.2f} 万元")
         # ========== 阶段6: 生成报告 ==========
         print("\n[阶段6] 生成分析报告...")
         self.generate_report(wind_results, solar_results, metrics, analysis)
@@ -299,19 +322,50 @@ Long Short-Term Memory (LSTM) 是一种特殊的循环神经网络(RNN)，擅长
 | 绿氢产量 | {metrics['h2_production']:.2f} kg |
 | 热电联产产热 | {metrics['chp_heat_total']:.2f} kWh |
 | 电解槽利用率 | {metrics['electrolyzer_utilization']:.2f}% |
-### 4.3 经济效益
+
+### 4.3 绿氢属性
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| 绿电占比 | {metrics['green_power_ratio']:.2f}% | 电解槽用电中绿电比例 |
+| 绿氢产量 | {metrics['h2_production']:.2f} kg | 由绿电生产的氢气总量 |
+
+> **绿氢认证说明**：根据国内绿氢认证相关规范，当电解槽用电中绿电占比≥95%时，可认定为绿氢。本系统绿电占比达 {metrics['green_power_ratio']:.2f}%，{'已达到' if metrics['green_power_ratio'] >= 95 else '接近'}绿氢认证标准。
+
+### 4.4 经济效益
+#### 4.4.1 收益明细
 | 指标 | 值 |
 |------|-----|
 | 总收益 | {metrics['total_revenue']:.2f} 元 |
 | 绿氢收益 | {metrics['h2_revenue']:.2f} 元 |
 | 供热收益 | {metrics['heat_revenue']:.2f} 元 |
 | 上网售电收益 | {metrics['grid_export_revenue']:.2f} 元 |
-| 总成本 | {metrics['total_cost']:.2f} 元 |
-| 购电成本 | {metrics['grid_import_cost']:.2f} 元 |
-| 运行运维成本 | {metrics['operation_cost']:.2f} 元 |
-| 设备折旧成本 | {metrics['depreciation_cost']:.2f} 元 |
+
+#### 4.4.2 成本明细
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| 总成本 | {metrics['total_cost']:.2f} 元 | 全口径成本 |
+| 购电成本 | {metrics['grid_import_cost']:.2f} 元 | 电网购电费用 |
+| 运行运维成本 | {metrics['operation_cost']:.2f} 元 | 含制氢、风电、光伏运维 |
+| &nbsp;&nbsp;制氢运维 | {metrics['h2_operation_cost']:.2f} 元 | 水耗、耗材、人工等 |
+| &nbsp;&nbsp;风电运维 | {metrics['wind_om_cost']:.2f} 元 | 按发电量计算 |
+| &nbsp;&nbsp;光伏运维 | {metrics['solar_om_cost']:.2f} 元 | 按发电量计算 |
+| 设备折旧成本 | {metrics['depreciation_cost']:.2f} 元 | 按投资金额和折旧年限计算 |
+| 土地成本 | {metrics['land_cost']:.2f} 元 | 按总投资比例估算 |
+| 财务成本 | {metrics['financial_cost']:.2f} 元 | 按总投资比例估算 |
+
+#### 4.4.3 净效益
+| 指标 | 值 |
+|------|-----|
 | **净经济效益** | **{metrics['net_economic_benefit']:.2f} 元** |
-### 4.4 环保效益
+
+#### 4.4.4 投资估算
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| 系统总投资估算 | {metrics['total_investment_est'] / 10000:.2f} 万元 | 含电解槽、风电、光伏设备投资 |
+
+> **成本核算说明**：本评估采用全成本核算方法，包含设备折旧、运维成本、土地成本、财务成本等全口径成本。设备折旧按直线法计算，电解槽折旧年限10年，风电20年，光伏25年。风光装机容量按调度周期内最大功率估算，实际投资需根据具体装机规模调整。
+
+### 4.5 环保效益
 | 指标 | 值 | 说明 |
 |------|-----|------|
 | 碳减排量 | {metrics['carbon_savings']:.2f} kg CO2 | 绿氢替代灰氢 + 余热替代燃煤供热 |
@@ -319,16 +373,45 @@ Long Short-Term Memory (LSTM) 是一种特殊的循环神经网络(RNN)，擅长
 ## 5. 指标核算口径说明
 ### 5.1 能效指标
 - **系统综合能效**：(氢能低位发热量 + 回收热能) / 电解槽消耗总电能
+  - 氢能低位发热量：33.3 kWh/kg
+  - 电解槽消耗总电能 = 绿电制氢 + 电网购电
 - **绿电自用率**：制氢消纳的绿电量 / 总绿发电量
 - **绿电上网率**：上网售电的绿电量 / 总绿发电量
 - **弃风弃光率**：无法消纳且无法上网的废弃电量 / 总绿发电量
-### 5.2 经济指标
+
+### 5.2 绿氢属性指标
+- **绿电占比**：电解槽用电中绿电的比例，用于绿氢认证参考
+  - 计算公式：绿电制氢量 / 电解槽总耗电量 × 100%
+  - 绿氢认证标准：≥95% 可认定为绿氢
+
+### 5.3 经济指标（全成本核算）
+#### 5.3.1 收益项
 - **总收益**：绿氢销售收入 + 供热收入 + 上网售电收入
-- **总成本**：购电成本 + 运行运维成本 + 设备折旧成本
+- **绿氢收益**：绿氢产量 × 绿氢售价（30元/kg）
+- **供热收益**：回收余热 × 供热价格（0.3元/kWh）
+- **上网售电收益**：上网售电量 × 上网电价（0.35元/kWh）
+
+#### 5.3.2 成本项
+- **总成本**：购电成本 + 运行运维成本 + 设备折旧成本 + 土地成本 + 财务成本
+- **购电成本**：电网购电量 × 购电电价（工商业峰谷电价）
+- **运行运维成本**：
+  - 制氢运维：水耗、耗材、人工等，按氢收益比例估算（10%）
+  - 风电运维：按发电量计算（0.05元/kWh）
+  - 光伏运维：按发电量计算（0.03元/kWh）
+- **设备折旧成本**：按直线法计算
+  - 电解槽折旧：单位投资1000元/kW，折旧年限10年
+  - 风电折旧：单位投资7000元/kW，折旧年限20年
+  - 光伏折旧：单位投资4500元/kW，折旧年限25年
+- **土地成本**：按总投资比例估算（年化2%）
+- **财务成本**：按总投资比例估算（年化4%）
+
+#### 5.3.3 净效益
 - **净经济效益**：总收益 - 总成本
-### 5.3 环保指标
+
+### 5.4 环保指标
 - **碳减排量**：绿氢替代煤制灰氢的减排量 + 余热替代燃煤供热的减排量
-- 减排因子：氢 10 kgCO₂/kg，热 0.11 kgCO₂/kWh
+- 减排因子：氢 10 kgCO₂/kg（灰氢排放因子），热 0.11 kgCO₂/kWh（燃煤供热排放因子）
+- 注意：仅绿电部分产生减排，网电部分不计入
 ---
 ## 6. 大模型策略解读
 {analysis}
@@ -337,13 +420,18 @@ Long Short-Term Memory (LSTM) 是一种特殊的循环神经网络(RNN)，擅长
 ### 7.1 创新点
 1. **双scaler归一化**：输入特征和输出目标分别归一化，避免尺度混淆导致的预测偏差
 2. **并网协同调度**：电网作为备用电源，保证电解槽连续稳定运行，提升设备利用率
-3. **全成本经济核算**：区分总收益、总成本、净效益，经济评估更严谨
+3. **全成本经济核算**：包含设备折旧、运维成本、土地成本、财务成本等全口径成本，经济评估更严谨
 4. **分时段MAPE评估**：单独统计白天时段预测精度，消除夜间零值干扰
+5. **绿氢属性认证**：计算并展示绿电占比，匹配绿氢认证相关规范
+6. **电价机制优化**：区分购电电价（工商业峰谷电价）和售电电价（新能源并网标杆电价），更符合实际电力市场
 ### 7.2 不足与改进方向
 1. **预测精度**：可引入 Transformer 或注意力机制提升预测精度，增加气象特征
 2. **调度策略**：可升级为强化学习 (DQN/PPO) 实现更智能的多目标优化调度
 3. **不确定性**：可引入随机规划或鲁棒优化处理风光功率的波动性
 4. **系统规模**：可根据实际场景调整电解槽容量，优化源荷匹配度
+5. **储能配置**：可新增储能电池配置，利用峰谷电价套利提升经济性
+6. **绿电交易**：可引入绿电交易机制，探索绿电溢价收益
+7. **多能互补**：可扩展为风光储氢多能互补系统，增加灵活性
 ### 7.3 未来展望
 - 短期: 升级为强化学习调度（课程论文）
 - 中期: 引入多目标优化 (NSGA-II) 进行毕设研究
