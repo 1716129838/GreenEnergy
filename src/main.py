@@ -476,3 +476,14 @@ GreenEnergy_PDCA/
 if __name__ == '__main__':
     # 配置路径
     DATA_PATH = 'data/opsd_time_series.csv'
+    OUTPUT_DIR = 'results'
+
+    # 创建并运行系统
+    system = GreenEnergySystem(DATA_PATH, OUTPUT_DIR)
+    system.initialize()
+    results = system.run()
+
+    print("\n结果摘要:")
+    print(f"  风电预测 RMSE: {results['wind_rmse']:.4f}")
+    print(f"  光伏预测 RMSE: {results['solar_rmse']:.4f}")
+    print(f"  系统能效: {results['metrics']['overall_efficiency']:.2f}%")
